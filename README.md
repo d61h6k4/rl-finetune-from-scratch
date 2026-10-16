@@ -45,6 +45,48 @@ change in pass@8. Under the fail-open verifier the policy learns to emit
 unevaluable output, which the broken grader accepts, so its training reward goes
 to about 1 while its real accuracy goes to about 0.
 
+## SFT vs RL
+
+Both phases train the same model on the same prompts. They differ in what the
+model learns from.
+
+**SFT** (`make_demos`, `sft_loss`, `pretrain`). The prompt is `BOS 3 7 2 = 0 2 0`
+and the target is one completion from the solver, picked at random among the valid
+ones: `3 7 + 2 * EOS`. The loss is cross-entropy on those 6 completion tokens,
+ordinary next-token prediction. It teaches the format (5 tokens, then `EOS`, in
+valid postfix order) and a rough prompt-to-answer link. The model only sees
+correct answers, never a wrong one, and it is pushed toward the particular answer
+it was shown even when a task has several valid ones. Imitation does not teach the
+arithmetic: the base solves 12.5% of held-out tasks, mostly failing on wrong
+digits (53% of samples) or wrong value (33%), with format errors under 2%.
+
+**RL** (`rollout`, `grpo_loss`, `train_grpo`). Same prompts, no target
+completions. The model samples 8 completions per prompt and `verify` scores each
+one: 1.0 if it uses the right numbers and hits the target, else 0.0. The policy
+gradient term is `-ratio * A`, where `A` is the sample's reward minus its group's
+mean (divided by the group's std). Tokens in samples better than their siblings
+are pushed up, tokens in worse ones down. A small `beta * kl_k3` term keeps the
+policy near the SFT reference. Any valid answer earns full reward, so there is no
+preferred answer, and failing samples give a negative signal. A group where every
+sample gets the same reward has advantage 0 and teaches nothing, so early on only
+prompts with at least one lucky sample contribute.
+
+| | SFT | RL (GRPO) |
+|---|---|---|
+| Signal | the demonstrated tokens | one scalar reward per whole sample |
+| Data | fixed solver demos | the model's own samples, regenerated each step |
+| Sees failures | no | yes (negative advantage) |
+| Several valid answers | imitates the one it was shown | rewards any of them |
+| Credit assignment | per token, exact | one reward spread over the whole completion |
+
+In the results above, SFT gives a base that sometimes succeeds, and RL needs that
+because it can only reinforce what it sees rewarded. RL then raised pass@1 from
+0.125 to 0.306 but left pass@8 almost unchanged, so it mostly made the model
+consistent at answers it could already find. SFT cannot be gamed the way RL can:
+it never consults a verifier, and its demos are correct by construction. RL
+optimizes the verifier, not the task, which is why the fail-open grader's shortest
+path to reward 1 was to emit malformed output.
+
 ## Layout
 
 - `rpn.py`: environment. `eval_rpn` (ground truth), `candidates`/`solve` (oracle),
